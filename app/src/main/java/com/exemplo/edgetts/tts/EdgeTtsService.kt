@@ -83,18 +83,63 @@ class EdgeTtsService : TextToSpeechService() {
         return availability
     }
 
-    override fun onGetVoices(): List<Voice> {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private fun getAvailableEdgeVoices(context: Context): List<EdgeVoice> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val cachedJson = prefs.getString(KEY_CACHED_VOICES_JSON, null)
-        val sourceList = parseCachedVoices(cachedJson).ifEmpty {
+        return parseCachedVoices(cachedJson).ifEmpty {
             EdgeTtsClient.DEFAULT_FALLBACK_VOICES
         }
+    }
+
+    override fun onGetVoices(): List<Voice> {
+        val sourceList = getAvailableEdgeVoices(this)
 
         return sourceList.map { v ->
             val parts = v.locale.split("-")
             val locale = if (parts.size >= 2) Locale(parts[0], parts[1]) else Locale("pt", "BR")
             Voice(v.shortName, locale, Voice.QUALITY_HIGH, Voice.LATENCY_NORMAL, true, emptySet())
         }
+    }
+
+    override fun onIsValidVoiceName(voiceName: String?): Int {
+        if (voiceName.isNullOrBlank()) return TextToSpeech.ERROR
+        val matched = findMatchingVoiceShortName(voiceName, getAvailableEdgeVoices(this))
+        return if (matched != null) TextToSpeech.SUCCESS else TextToSpeech.ERROR
+    }
+
+    override fun onLoadVoice(voiceName: String?): Int {
+        if (voiceName.isNullOrBlank()) return TextToSpeech.ERROR
+        val voices = getAvailableEdgeVoices(this)
+        val matched = voices.firstOrNull {
+            it.shortName.equals(voiceName.trim(), ignoreCase = true)
+        } ?: voices.firstOrNull {
+            it.shortName.contains(voiceName.trim(), ignoreCase = true) ||
+                voiceName.trim().contains(it.shortName, ignoreCase = true)
+        } ?: return TextToSpeech.ERROR
+
+        val parts = matched.locale.split("-")
+        val lang = parts.getOrNull(0).orEmpty()
+        val country = parts.getOrNull(1).orEmpty()
+        currentLanguage = arrayOf(lang, country, matched.shortName)
+        return TextToSpeech.SUCCESS
+    }
+
+    private fun findMatchingVoiceShortName(voiceName: String?, voices: List<EdgeVoice>): String? {
+        if (voiceName.isNullOrBlank()) return null
+        val target = voiceName.trim()
+
+        voices.firstOrNull { it.shortName.equals(target, ignoreCase = true) }?.let {
+            return it.shortName
+        }
+
+        voices.firstOrNull {
+            it.shortName.contains(target, ignoreCase = true) ||
+                target.contains(it.shortName, ignoreCase = true)
+        }?.let {
+            return it.shortName
+        }
+
+        return null
     }
 
     private fun parseCachedVoices(rawJson: String?): List<EdgeVoice> {
@@ -147,7 +192,8 @@ class EdgeTtsService : TextToSpeechService() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val configuredVoice = prefs.getString(KEY_VOICE, DEFAULT_VOICE)?.trim().orEmpty()
             .ifEmpty { DEFAULT_VOICE }
-        val primaryVoice = resolveVoiceForRequest(request, configuredVoice)
+        val voices = getAvailableEdgeVoices(this)
+        val primaryVoice = resolveVoiceForRequest(request, configuredVoice, voices)
 
         val dialogueVoiceEnabled = prefs.getBoolean(KEY_DIALOGUE_VOICE_ENABLED, false)
         val dialogueVoice = prefs.getString(KEY_DIALOGUE_VOICE, DEFAULT_DIALOGUE_VOICE)?.trim().orEmpty()
@@ -304,10 +350,40 @@ class EdgeTtsService : TextToSpeechService() {
         }
     }
 
-    /**
-     * Separa falas (travessão ou aspas) de trechos narrativos dentro de cada parágrafo,
-     * agrupando blocos consecutivos da mesma categoria para manter a síntese rápida.
-     */
+    private fun resolveVoiceForRequest(
+        request: SynthesisRequest,
+        configuredVoice: String,
+        availableVoices: List<EdgeVoice>
+    ): String {
+        // 1. Se o app de leitura pediu um voiceName específico e válido, usa essa voz
+        val matchedRequestedVoice = findMatchingVoiceShortName(request.voiceName, availableVoices)
+        if (matchedRequestedVoice != null) {
+            return matchedRequestedVoice
+        }
+
+        // 2. Se o app não pediu voz específica, usa a voz configurada no GlowTTS
+        if (configuredVoice.isNotBlank()) {
+            return configuredVoice
+        }
+
+        // 3. Fallback por idioma/país caso nenhuma voz esteja configurada
+        val lang = (request.language ?: "").lowercase(Locale.US)
+        val country = (request.country ?: "").uppercase(Locale.US)
+        return when {
+            lang.startsWith("por") || lang.startsWith("pt") ->
+                if (country == "PRT" || country == "PT") "pt-PT-RaquelNeural" else "pt-BR-FranciscaNeural"
+            lang.startsWith("eng") || lang.startsWith("en") ->
+                if (country == "GBR" || country == "GB") "en-GB-SoniaNeural" else "en-US-JennyNeural"
+            lang.startsWith("spa") || lang.startsWith("es") -> "es-ES-ElviraNeural"
+            lang.startsWith("fra") || lang.startsWith("fr") -> "fr-FR-DeniseNeural"
+            lang.startsWith("deu") || lang.startsWith("de") -> "de-DE-KatjaNeural"
+            lang.startsWith("ita") || lang.startsWith("it") -> "it-IT-ElsaNeural"
+            lang.startsWith("jpn") || lang.startsWith("ja") -> "ja-JP-NanamiNeural"
+            lang.startsWith("zho") || lang.startsWith("zh") -> "zh-CN-XiaoxiaoNeural"
+            else -> DEFAULT_VOICE
+        }
+    }
+
     private fun buildDialogueAwareSegments(text: String): List<SpeechSegment> {
         val normalized = text.replace("\r\n", "\n").trim()
         if (normalized.isEmpty()) return emptyList()
@@ -325,8 +401,6 @@ class EdgeTtsService : TextToSpeechService() {
             return listOf(SpeechSegment(normalized, isDialogue = false))
         }
 
-        // Agrupa segmentos consecutivos com o mesmo tipo (diálogo + diálogo ou narração + narração)
-        // até o limite TARGET_MAX_CHUNK_CHARS para evitar micro-requisições lentas.
         val merged = ArrayList<SpeechSegment>()
         for (seg in rawSegments) {
             val cleanText = seg.text.trim()
@@ -354,14 +428,12 @@ class EdgeTtsService : TextToSpeechService() {
     }
 
     private fun extractSegmentsFromLine(line: String, out: MutableList<SpeechSegment>) {
-        // 1. Caso clássico com travessão no início da linha (ex.: "— Olá! — disse ele. — Tudo bem?")
         if (startsWithDash(line)) {
             val parts = splitByDashMarkers(line)
             if (parts.isNotEmpty()) {
                 for (i in parts.indices) {
                     val piece = parts[i].trim()
                     if (piece.isEmpty()) continue
-                    // Em diálogos com travessão: índice par (0, 2, 4...) é fala; índice ímpar (1, 3...) é incisa narrativa
                     val isSpeech = (i % 2 == 0)
                     out.add(SpeechSegment(piece, isDialogue = isSpeech))
                 }
@@ -369,7 +441,6 @@ class EdgeTtsService : TextToSpeechService() {
             }
         }
 
-        // 2. Caso de aspas ou fala após narração na mesma linha (ex.: Ela disse: "Oi" e saiu.)
         val quoteRegex = Regex("""(["“«][^"”»]+["”»])""")
         var cursor = 0
         var matchedAny = false
@@ -395,7 +466,6 @@ class EdgeTtsService : TextToSpeechService() {
             return
         }
 
-        // 3. Linha puramente narrativa
         out.add(SpeechSegment(line, isDialogue = false))
     }
 
@@ -492,27 +562,5 @@ class EdgeTtsService : TextToSpeechService() {
             .edit()
             .putString(KEY_LAST_DIAG, message)
             .apply()
-    }
-
-    private fun resolveVoiceForRequest(request: SynthesisRequest, configuredVoice: String): String {
-        if (configuredVoice.isNotBlank()) {
-            return configuredVoice
-        }
-
-        val lang = (request.language ?: "").lowercase(Locale.US)
-        val country = (request.country ?: "").uppercase(Locale.US)
-        return when {
-            lang.startsWith("por") || lang.startsWith("pt") ->
-                if (country == "PRT" || country == "PT") "pt-PT-RaquelNeural" else "pt-BR-FranciscaNeural"
-            lang.startsWith("eng") || lang.startsWith("en") ->
-                if (country == "GBR" || country == "GB") "en-GB-SoniaNeural" else "en-US-JennyNeural"
-            lang.startsWith("spa") || lang.startsWith("es") -> "es-ES-ElviraNeural"
-            lang.startsWith("fra") || lang.startsWith("fr") -> "fr-FR-DeniseNeural"
-            lang.startsWith("deu") || lang.startsWith("de") -> "de-DE-KatjaNeural"
-            lang.startsWith("ita") || lang.startsWith("it") -> "it-IT-ElsaNeural"
-            lang.startsWith("jpn") || lang.startsWith("ja") -> "ja-JP-NanamiNeural"
-            lang.startsWith("zho") || lang.startsWith("zh") -> "zh-CN-XiaoxiaoNeural"
-            else -> DEFAULT_VOICE
-        }
     }
 }
