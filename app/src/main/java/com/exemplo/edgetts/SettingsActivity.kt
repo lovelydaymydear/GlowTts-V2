@@ -46,6 +46,7 @@ class SettingsActivity : AppCompatActivity() {
     private var savedDialogueVoice: String = DEFAULT_DIALOGUE_VOICE
     private var dialogueVoiceEnabled: Boolean = false
     private var singleVoiceMode: Boolean = true
+    private var isPopulatingSpinners: Boolean = false
     private val activeVoiceQueue = ArrayList<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,7 +58,6 @@ class SettingsActivity : AppCompatActivity() {
         savedVoice = prefs.getString(KEY_VOICE, DEFAULT_VOICE)?.trim().orEmpty()
             .ifEmpty { DEFAULT_VOICE }
 
-        // Carrega a voz de diálogo de forma independente da voz geral
         val storedDialogueVoice = prefs.getString(KEY_DIALOGUE_VOICE, null)?.trim().orEmpty()
         savedDialogueVoice = if (storedDialogueVoice.isNotEmpty()) {
             storedDialogueVoice
@@ -112,8 +112,34 @@ class SettingsActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
+                if (isPopulatingSpinners) return
                 selectedLanguage = languageOptions.getOrElse(position) { ALL_LANGUAGES_OPTION }
                 applyFilters(binding.etVoiceSearch.text?.toString().orEmpty(), savedVoice)
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spVoices.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                if (isPopulatingSpinners) return
+                val pickedVoice = filteredVoices.getOrNull(position)?.shortName ?: return
+                if (pickedVoice.isNotBlank()) {
+                    savedVoice = pickedVoice
+                    if (singleVoiceMode || activeVoiceQueue.size <= 1) {
+                        activeVoiceQueue.clear()
+                        activeVoiceQueue.add(pickedVoice)
+                    } else if (!activeVoiceQueue.contains(pickedVoice)) {
+                        activeVoiceQueue.add(0, pickedVoice)
+                    }
+                    updateActiveVoicesLabel()
+                    persistAllSettings(showStatusMessage = false)
+                }
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -143,6 +169,7 @@ class SettingsActivity : AppCompatActivity() {
             }
             savedVoice = activeVoiceQueue.firstOrNull() ?: currentVoice
             updateActiveVoicesLabel()
+            persistAllSettings(showStatusMessage = false)
             binding.tvSettingsStatus.text = "Adicionada: $currentVoice (${activeVoiceQueue.size} voz(es) na fila)"
         }
 
@@ -154,10 +181,10 @@ class SettingsActivity : AppCompatActivity() {
             activeVoiceQueue.clear()
             activeVoiceQueue.add(currentVoice)
             updateActiveVoicesLabel()
+            persistAllSettings(showStatusMessage = false)
             binding.tvSettingsStatus.text = "Modo de voz única: $currentVoice"
         }
 
-        // Salva apenas a voz de diálogo escolhida, sem mexer na voz geral
         binding.btnSetDialogueVoice?.setOnClickListener {
             val currentVoice = filteredVoices.getOrNull(binding.spVoices.selectedItemPosition)?.shortName
                 ?: savedDialogueVoice
@@ -197,7 +224,9 @@ class SettingsActivity : AppCompatActivity() {
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                persistAllSettings(showStatusMessage = false)
+            }
         })
 
         binding.sbPitch.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -207,59 +236,72 @@ class SettingsActivity : AppCompatActivity() {
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                persistAllSettings(showStatusMessage = false)
+            }
         })
 
-        // Salva a voz geral preservando a voz de diálogo já definida
         binding.btnSaveSettings.setOnClickListener {
-            val selectedVoiceObj = filteredVoices.getOrNull(binding.spVoices.selectedItemPosition)
-            val chosenVoice = selectedVoiceObj?.shortName ?: savedVoice
-            savedVoice = chosenVoice
+            persistAllSettings(showStatusMessage = true)
+        }
 
-            val currentDialogueInPrefs = prefs.getString(KEY_DIALOGUE_VOICE, null)?.trim().orEmpty()
-            val dialogueVoiceToKeep = if (currentDialogueInPrefs.isNotEmpty()) {
-                currentDialogueInPrefs
-            } else {
-                savedDialogueVoice
+        loadRemoteVoices()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        persistAllSettings(showStatusMessage = false)
+    }
+
+    private fun persistAllSettings(showStatusMessage: Boolean) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val chosenVoice = savedVoice.trim().ifEmpty { DEFAULT_VOICE }
+        savedVoice = chosenVoice
+
+        val currentDialogueInPrefs = prefs.getString(KEY_DIALOGUE_VOICE, null)?.trim().orEmpty()
+        val dialogueVoiceToKeep = if (currentDialogueInPrefs.isNotEmpty()) {
+            currentDialogueInPrefs
+        } else {
+            savedDialogueVoice
+        }
+        savedDialogueVoice = dialogueVoiceToKeep
+
+        val finalList = if (singleVoiceMode || activeVoiceQueue.size <= 1) {
+            singleVoiceMode = true
+            activeVoiceQueue.clear()
+            activeVoiceQueue.add(chosenVoice)
+            listOf(chosenVoice)
+        } else {
+            if (!activeVoiceQueue.contains(chosenVoice)) {
+                activeVoiceQueue.add(0, chosenVoice)
             }
-            savedDialogueVoice = dialogueVoiceToKeep
+            activeVoiceQueue.distinct().toList()
+        }
 
-            val finalList = if (singleVoiceMode || activeVoiceQueue.size <= 1) {
-                singleVoiceMode = true
-                activeVoiceQueue.clear()
-                activeVoiceQueue.add(chosenVoice)
-                listOf(chosenVoice)
-            } else {
-                if (!activeVoiceQueue.contains(chosenVoice)) {
-                    activeVoiceQueue.add(0, chosenVoice)
-                }
-                activeVoiceQueue.distinct().toList()
-            }
+        val ratePercent = binding.sbRate.progress - 50
+        val pitchHz = binding.sbPitch.progress - 50
+        val serializedQueue = finalList.joinToString("|")
 
-            val ratePercent = binding.sbRate.progress - 50
-            val pitchHz = binding.sbPitch.progress - 50
-            val serializedQueue = finalList.joinToString("|")
+        prefs.edit()
+            .putString(KEY_VOICE, savedVoice)
+            .putString(KEY_VOICE_LIST, serializedQueue)
+            .putBoolean(KEY_SINGLE_VOICE_MODE, singleVoiceMode)
+            .putString(KEY_DIALOGUE_VOICE, dialogueVoiceToKeep)
+            .putBoolean(KEY_DIALOGUE_VOICE_ENABLED, dialogueVoiceEnabled)
+            .putInt(KEY_RATE_PERCENT, ratePercent)
+            .putInt(KEY_PITCH_HZ, pitchHz)
+            .apply()
 
-            prefs.edit()
-                .putString(KEY_VOICE, savedVoice)
-                .putString(KEY_VOICE_LIST, serializedQueue)
-                .putBoolean(KEY_SINGLE_VOICE_MODE, singleVoiceMode)
-                .putString(KEY_DIALOGUE_VOICE, dialogueVoiceToKeep)
-                .putBoolean(KEY_DIALOGUE_VOICE_ENABLED, dialogueVoiceEnabled)
-                .putInt(KEY_RATE_PERCENT, ratePercent)
-                .putInt(KEY_PITCH_HZ, pitchHz)
-                .apply()
+        updateActiveVoicesLabel()
+        updateDialogueStatusLabel()
 
-            updateActiveVoicesLabel()
-            updateDialogueStatusLabel()
+        if (showStatusMessage) {
             binding.tvSettingsStatus.text = if (singleVoiceMode) {
                 "Salvo! Voz geral: $savedVoice | Diálogo: $savedDialogueVoice (${if (dialogueVoiceEnabled) "ativo" else "inativo"})"
             } else {
                 "Salvo! Rotação (${finalList.size} vozes): $serializedQueue"
             }
         }
-
-        loadRemoteVoices()
     }
 
     private fun updateDialogueStatusLabel() {
@@ -333,61 +375,73 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun rebuildLanguagesAndVoices(voices: List<EdgeVoice>, targetShortName: String) {
-        val distinctLocales = voices
-            .map { it.locale.trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-            .sortedWith(
-                compareBy<String> { !it.startsWith("pt", ignoreCase = true) }
-                    .thenBy { it }
-            )
+        isPopulatingSpinners = true
+        try {
+            val distinctLocales = voices
+                .map { it.locale.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .sortedWith(
+                    compareBy<String> { !it.startsWith("pt", ignoreCase = true) }
+                        .thenBy { it }
+                )
 
-        languageOptions = listOf(ALL_LANGUAGES_OPTION) + distinctLocales
+            languageOptions = listOf(ALL_LANGUAGES_OPTION) + distinctLocales
 
-        val targetVoiceLocale = voices.firstOrNull {
-            it.shortName.equals(targetShortName, ignoreCase = true)
-        }?.locale
+            val targetVoiceLocale = voices.firstOrNull {
+                it.shortName.equals(targetShortName, ignoreCase = true)
+            }?.locale
 
-        if (selectedLanguage == ALL_LANGUAGES_OPTION && !targetVoiceLocale.isNullOrBlank()) {
-            selectedLanguage = targetVoiceLocale
+            if (selectedLanguage == ALL_LANGUAGES_OPTION && !targetVoiceLocale.isNullOrBlank()) {
+                selectedLanguage = targetVoiceLocale
+            }
+
+            val langAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, languageOptions)
+            langAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            binding.spLanguages.adapter = langAdapter
+
+            val langIdx = languageOptions.indexOfFirst { it.equals(selectedLanguage, ignoreCase = true) }
+            if (langIdx >= 0) {
+                binding.spLanguages.setSelection(langIdx, false)
+            } else {
+                selectedLanguage = ALL_LANGUAGES_OPTION
+                binding.spLanguages.setSelection(0, false)
+            }
+
+            applyFilters(binding.etVoiceSearch.text?.toString().orEmpty(), targetShortName)
+        } finally {
+            isPopulatingSpinners = false
         }
-
-        val langAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, languageOptions)
-        langAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.spLanguages.adapter = langAdapter
-
-        val langIdx = languageOptions.indexOfFirst { it.equals(selectedLanguage, ignoreCase = true) }
-        if (langIdx >= 0) {
-            binding.spLanguages.setSelection(langIdx)
-        } else {
-            selectedLanguage = ALL_LANGUAGES_OPTION
-            binding.spLanguages.setSelection(0)
-        }
-
-        applyFilters(binding.etVoiceSearch.text?.toString().orEmpty(), targetShortName)
     }
 
     private fun applyFilters(query: String, targetShortName: String) {
-        val trimmed = query.trim().lowercase(Locale.ROOT)
-        filteredVoices = allVoices.filter { voice ->
-            val matchesLang = selectedLanguage == ALL_LANGUAGES_OPTION ||
-                voice.locale.equals(selectedLanguage, ignoreCase = true)
-            val matchesSearch = trimmed.isEmpty() ||
-                voice.displayLabel().lowercase(Locale.ROOT).contains(trimmed)
-            matchesLang && matchesSearch
-        }
+        val previousFlag = isPopulatingSpinners
+        isPopulatingSpinners = true
+        try {
+            val trimmed = query.trim().lowercase(Locale.ROOT)
+            val matched = allVoices.filter { voice ->
+                val matchesLang = selectedLanguage == ALL_LANGUAGES_OPTION ||
+                    voice.locale.equals(selectedLanguage, ignoreCase = true)
+                val matchesSearch = trimmed.isEmpty() ||
+                    voice.displayLabel().lowercase(Locale.ROOT).contains(trimmed)
+                matchesLang && matchesSearch
+            }
 
-        val listToShow = if (filteredVoices.isEmpty()) allVoices else filteredVoices
-        filteredVoices = listToShow
+            filteredVoices = if (matched.isEmpty()) allVoices else matched
 
-        val labels = listToShow.map { it.displayLabel() }
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels)
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.spVoices.adapter = adapter
+            val labels = filteredVoices.map { it.displayLabel() }
+            val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels)
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            binding.spVoices.adapter = adapter
 
-        val index = listToShow.indexOfFirst { it.shortName.equals(targetShortName, ignoreCase = true) }
-        if (index >= 0) {
-            binding.spVoices.setSelection(index)
+            val index = filteredVoices.indexOfFirst { it.shortName.equals(targetShortName, ignoreCase = true) }
+            if (index >= 0) {
+                binding.spVoices.setSelection(index, false)
+            } else {
+                binding.spVoices.setSelection(0, false)
+            }
+        } finally {
+            isPopulatingSpinners = previousFlag
         }
     }
 
