@@ -91,6 +91,12 @@ class EdgeTtsService : TextToSpeechService() {
         }
     }
 
+    private fun getPersistedVoice(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val saved = prefs.getString(KEY_VOICE, null)?.trim()
+        return if (!saved.isNullOrEmpty()) saved else DEFAULT_VOICE
+    }
+
     override fun onGetVoices(): List<Voice> {
         val sourceList = getAvailableEdgeVoices(this)
 
@@ -190,8 +196,7 @@ class EdgeTtsService : TextToSpeechService() {
         }
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val configuredVoice = prefs.getString(KEY_VOICE, DEFAULT_VOICE)?.trim().orEmpty()
-            .ifEmpty { DEFAULT_VOICE }
+        val configuredVoice = getPersistedVoice(this)
         val voices = getAvailableEdgeVoices(this)
         val primaryVoice = resolveVoiceForRequest(request, configuredVoice, voices)
 
@@ -225,8 +230,19 @@ class EdgeTtsService : TextToSpeechService() {
             savedList
         }
 
-        val ratePercent = prefs.getInt(KEY_RATE_PERCENT, (request.speechRate - 100).coerceIn(-50, 100))
-        val pitchHz = prefs.getInt(KEY_PITCH_HZ, (request.pitch - 100).coerceIn(-50, 50))
+        val savedRatePercent = prefs.getInt(KEY_RATE_PERCENT, 0).coerceIn(-50, 100)
+        val ratePercent = if (request.speechRate > 0 && request.speechRate != 100) {
+            (request.speechRate - 100).coerceIn(-50, 100)
+        } else {
+            savedRatePercent
+        }
+
+        val savedPitchHz = prefs.getInt(KEY_PITCH_HZ, 0).coerceIn(-50, 50)
+        val pitchHz = if (request.pitch > 0 && request.pitch != 100) {
+            (request.pitch - 100).coerceIn(-50, 50)
+        } else {
+            savedPitchHz
+        }
 
         val rateStr = if (ratePercent >= 0) "+${ratePercent}%" else "${ratePercent}%"
         val pitchStr = if (pitchHz >= 0) "+${pitchHz}Hz" else "${pitchHz}Hz"
@@ -355,18 +371,15 @@ class EdgeTtsService : TextToSpeechService() {
         configuredVoice: String,
         availableVoices: List<EdgeVoice>
     ): String {
-        // 1. Se o app de leitura pediu um voiceName específico e válido, usa essa voz
         val matchedRequestedVoice = findMatchingVoiceShortName(request.voiceName, availableVoices)
         if (matchedRequestedVoice != null) {
             return matchedRequestedVoice
         }
 
-        // 2. Se o app não pediu voz específica, usa a voz configurada no GlowTTS
         if (configuredVoice.isNotBlank()) {
             return configuredVoice
         }
 
-        // 3. Fallback por idioma/país caso nenhuma voz esteja configurada
         val lang = (request.language ?: "").lowercase(Locale.US)
         val country = (request.country ?: "").uppercase(Locale.US)
         return when {
